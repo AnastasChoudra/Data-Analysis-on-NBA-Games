@@ -38,7 +38,11 @@ def team_points(df: pd.DataFrame, year: int, team: str) -> pd.Series:
 
 
 def cohens_d(a: pd.Series, b: pd.Series) -> float:
-    """Compute Cohen's d for two independent samples."""
+    """Compute Cohen's d for two independent samples.
+
+    Cohen's d is calculated using pooled standard deviation. Returns NaN if
+    samples are too small to estimate an effect size reliably.
+    """
     na = a.dropna(); nb = b.dropna()
     n1, n2 = len(na), len(nb)
     if n1 < 2 or n2 < 2:
@@ -50,20 +54,52 @@ def cohens_d(a: pd.Series, b: pd.Series) -> float:
     return (na.mean() - nb.mean()) / pooled_sd
 
 
-def compare_team_points(df: pd.DataFrame, year: int, team1: str, team2: str, bins: int = 20):
+def _interpret_cohens_d(d: float) -> str:
+    """Return a human-friendly label for the magnitude of Cohen's d.
+
+    Thresholds (conventional): 0.2 small, 0.5 medium, 0.8 large.
+    """
+    if math.isnan(d):
+        return "insufficient data"
+    ad = abs(d)
+    if ad < 0.2:
+        return "negligible"
+    if ad < 0.5:
+        return "small"
+    if ad < 0.8:
+        return "medium"
+    return "large"
+
+
+def compare_team_points(df: pd.DataFrame, year: int, team1: str, team2: str, bins: int = 20) -> dict:
+    """Compare points between two teams in a given year.
+
+    Prints descriptive statistics and a statistical test, plots distributions,
+    and returns a dict of numeric results for summary/interpretation.
+    """
+    # Safely extract point series for each team
     a = team_points(df, year, team1)
     b = team_points(df, year, team2)
-    print(f"\n{year} {team1} (n={len(a)}) mean={a.mean():.2f} std={a.std(ddof=1):.2f}")
-    print(f"{year} {team2} (n={len(b)}) mean={b.mean():.2f} std={b.std(ddof=1):.2f}")
 
-    # Difference in means and t-test
+    print(f"\n{year} - Comparing {team1} vs {team2}:")
+    print(f"  {team1}: n={len(a)}, mean={a.mean():.2f}, std={a.std(ddof=1):.2f}")
+    print(f"  {team2}: n={len(b)}, mean={b.mean():.2f}, std={b.std(ddof=1):.2f}")
+
+    # Difference in means and Welch's t-test (does not assume equal variances)
     mean_diff = a.mean() - b.mean()
     t_stat, pval = ttest_ind(a, b, equal_var=False, nan_policy='omit')
     d = cohens_d(a, b)
-    print(f"Difference in Means ({team1} - {team2}): {mean_diff:.2f}")
-    print(f"Welch t-test: t={t_stat:.3f}, p={pval:.3e}, Cohen's d={d:.3f}")
 
-    # Plot
+    # More informative print statements with interpretation cues
+    print(f"  Difference in Means ({team1} - {team2}): {mean_diff:.2f}")
+    print(f"  Welch t-test: t={t_stat:.3f}, p-value={pval:.3e}")
+    if pval < 0.05:
+        print("    -> p < 0.05: difference is statistically significant at alpha=0.05")
+    else:
+        print("    -> p >= 0.05: no evidence to reject the null of equal means")
+    print(f"  Cohen's d = {d:.3f} ({_interpret_cohens_d(d)})")
+
+    # Plot densities to visualize distributions and overlap
     plt.figure(figsize=(8, 5))
     sns.histplot(a, color='tab:blue', label=team1, stat='density', kde=True, bins=bins, alpha=0.6)
     sns.histplot(b, color='tab:orange', label=team2, stat='density', kde=True, bins=bins, alpha=0.6)
@@ -72,6 +108,20 @@ def compare_team_points(df: pd.DataFrame, year: int, team1: str, team2: str, bin
     plt.xlabel('Points')
     plt.tight_layout()
     plt.show()
+
+    # Return results for later summary
+    return {
+        'year': year,
+        'team1': team1,
+        'team2': team2,
+        'n1': len(a),
+        'n2': len(b),
+        'mean_diff': mean_diff,
+        't_stat': t_stat,
+        'p_value': pval,
+        'cohens_d': d,
+        'cohens_d_label': _interpret_cohens_d(d),
+    }
 
 
 def boxplot_by_franchise(df: pd.DataFrame, year: int):
@@ -84,33 +134,132 @@ def boxplot_by_franchise(df: pd.DataFrame, year: int):
     plt.show()
 
 
-def contingency_analysis(df: pd.DataFrame, year: int):
+def contingency_analysis(df: pd.DataFrame, year: int) -> dict:
+    """Perform contingency analysis of game location vs result.
+
+    Prints the count and row-normalized proportions (win rate per location),
+    runs a chi-square test of independence, and returns the test statistics.
+    """
     df_y = df[df.year_id == year]
     table = pd.crosstab(df_y.game_location, df_y.game_result)
-    print(f"\nContingency Table (counts) for {year}:\n", table)
-    # Normalize to proportions by row (location)
+
+    print(f"\nContingency Table (counts) for {year}:")
+    print(table)
+
+    # Proportions by location show win/loss rates for each location (rows sum to 1)
     proportions = table.div(table.sum(axis=1), axis=0)
-    print(f"\nProportions (by location) for {year}:\n", proportions)
+    print(f"\nProportions (win rate by location) for {year}:")
+    print(proportions)
+
     chi2, p, dof, expected = chi2_contingency(table)
-    print(f"\nChi2 test: chi2={chi2:.3f}, p={p:.3e}, dof={dof}")
-    print("Expected frequencies:\n", pd.DataFrame(expected, index=table.index, columns=table.columns))
+    print(f"\nChi-square test of independence: chi2={chi2:.3f}, p-value={p:.3e}, dof={dof}")
+    if p < 0.05:
+        print("  -> p < 0.05: evidence suggests game location and game result are not independent (association present)")
+    else:
+        print("  -> p >= 0.05: no evidence of association between location and result")
+
+    expected_df = pd.DataFrame(expected, index=table.index, columns=table.columns)
+    print("Expected frequencies under independence:")
+    print(expected_df)
+
+    return {
+        'year': year,
+        'table': table,
+        'proportions': proportions,
+        'chi2': chi2,
+        'p_value': p,
+        'dof': dof,
+        'expected': expected_df,
+    }
 
 
-def correlation_analysis(df: pd.DataFrame, year: int):
+def _interpret_corr(r: float) -> str:
+    """Simple interpretation of correlation magnitude."""
+    ar = abs(r)
+    if ar < 0.1:
+        return "very weak"
+    if ar < 0.3:
+        return "weak"
+    if ar < 0.5:
+        return "moderate"
+    return "strong"
+
+
+def correlation_analysis(df: pd.DataFrame, year: int) -> dict:
+    """Compute and display correlation between forecast and point differential.
+
+    Returns correlation coefficient and p-value for later summary.
+    """
     df_y = df[df.year_id == year][['forecast', 'point_diff']].dropna()
     if len(df_y) < 2:
         print("Not enough data for correlation")
-        return
+        return {'year': year, 'n': len(df_y)}
+
+    # Covariance gives joint variability; Pearson's r gives standardized correlation
     cov = np.cov(df_y['forecast'], df_y['point_diff'])
     corr, pval = pearsonr(df_y['forecast'], df_y['point_diff'])
-    print(f"\nCovariance matrix for {year}:\n{cov}")
-    print(f"Pearson r={corr:.3f}, p={pval:.3e}")
 
+    print(f"\nCorrelation analysis for {year} (n={len(df_y)}):")
+    print("  Covariance matrix:\n", cov)
+    print(f"  Pearson r = {corr:.3f}, p-value = {pval:.3e} ({_interpret_corr(corr)})")
+
+    # Scatter with regression line to visualize relationship
     plt.figure(figsize=(7, 5))
     sns.regplot(data=df_y, x='forecast', y='point_diff', scatter_kws={'alpha':0.6})
     plt.title(f"{year}: Forecast vs Point Differential (r={corr:.2f})")
+    plt.xlabel('Forecasted Win Probability')
+    plt.ylabel('Point Differential')
     plt.tight_layout()
     plt.show()
+
+    return {
+        'year': year,
+        'n': len(df_y),
+        'covariance': cov,
+        'pearson_r': corr,
+        'p_value': pval,
+        'corr_label': _interpret_corr(corr),
+    }
+
+
+def interpretation_summary(results_by_year: dict):
+    """Print a concise, human-readable interpretation of all results.
+
+    This aggregates the numeric results returned by the analysis functions
+    and provides plain-language takeaways for quick reporting.
+    """
+    print("\n=== Final Interpretation Summary ===\n")
+    for year, res in results_by_year.items():
+        print(f"Year: {year}")
+        # Team comparison summary (if present)
+        tp = res.get('team_comparison')
+        if tp:
+            print(f"  {tp['team1']} vs {tp['team2']}: mean difference = {tp['mean_diff']:.2f}")
+            print(f"    p = {tp['p_value']:.3e} ({'statistically significant' if tp['p_value'] < 0.05 else 'not significant'})")
+            print(f"    Cohen's d = {tp['cohens_d']:.3f} ({tp['cohens_d_label']})")
+
+        # Contingency summary (if present)
+        cont = res.get('contingency')
+        if cont:
+            p = cont['p_value']
+            print(f"  Game location vs result: chi2 p = {p:.3e} ({'association present' if p < 0.05 else 'no association'})")
+
+        # Correlation summary (if present)
+        corr = res.get('correlation')
+        if corr:
+            print(f"  Forecast vs point_diff: r = {corr['pearson_r']:.3f} ({corr['corr_label']}), p = {corr['p_value']:.3e}")
+
+        print("")
+
+    # Overall takeaways (simple heuristics)
+    print("Takeaways:")
+    # Example inference: if any year has a large effect size for points difference, flag it
+    for year, res in results_by_year.items():
+        tp = res.get('team_comparison')
+        if tp and tp['cohens_d_label'] == 'large' and tp['p_value'] < 0.05:
+            print(f"  - {year}: Large, significant scoring difference between {tp['team1']} and {tp['team2']} (d={tp['cohens_d']:.2f}).")
+    print("  - Consider reporting these results alongside plots and exact tables in any write-up.")
+    print("\nNote: 'statistically significant' does not necessarily imply practical importance; consider effect sizes and context.")
 
 
 def main(data_path: Path = DATA_FILENAME):
@@ -123,13 +272,30 @@ def main(data_path: Path = DATA_FILENAME):
     # Quick preview
     print("Data preview:\n", nba.head())
 
-    # Analyze seasons
+    results = {}
+
+    # Analyze seasons and collect numeric summaries
     for year in (2010, 2014):
         print(f"\n--- Analysis for {year} ---")
-        compare_team_points(nba, year, 'Knicks', 'Nets')
+        results[year] = {}
+
+        # Team comparisons (returns a dict)
+        tp = compare_team_points(nba, year, 'Knicks', 'Nets')
+        results[year]['team_comparison'] = tp
+
+        # Boxplot (visual only)
         boxplot_by_franchise(nba, year)
-        contingency_analysis(nba, year)
-        correlation_analysis(nba, year)
+
+        # Contingency
+        cont = contingency_analysis(nba, year)
+        results[year]['contingency'] = cont
+
+        # Correlation
+        corr = correlation_analysis(nba, year)
+        results[year]['correlation'] = corr
+
+    # Print final interpretation/summary based on collected metrics
+    interpretation_summary(results)
 
 
 if __name__ == "__main__":
